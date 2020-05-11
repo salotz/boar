@@ -58,3 +58,9 @@ See the [[./wiki][wiki]].
 
 There is a very inactive [[https://groups.google.com/forum/#!forum/boarvcs][Google Groups Forum]]. If you want to help
 revitalize this project use the issues on github for now.
+
+* Credits
+
+All important credit to Mats Ekberg.
+
+My (@salotz) hope is to bring ~boar~ into the 2020s :P
