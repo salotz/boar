@@ -11,14 +11,17 @@ from ..config import (
     ENV_METHOD,
     DEFAULT_ENV,
     ENVS_DIR,
+    PYTHON_VERSION_SOURCE,
+    PYTHON_VERSIONS,
 )
 
 ## user config examples
 
 # SNIPPET:
 
-# # which virtual environment tool to use: venv or conda
-# ENV_METHOD = 'venv'
+# # which virtual environment tool to use: pyenv-virtualenv, venv, or
+# conda.  pyenv-virtualenv and conda works for all versions, venv only
+# works with python3.3 and above ENV_METHOD = 'venv'
 
 # # which env spec to use by default
 # DEFAULT_ENV = 'dev'
@@ -26,11 +29,29 @@ from ..config import (
 # # directory where env specs are read from
 # ENVS_DIR = 'envs'
 
+# Python version source, this is how we get the different python
+# versions
+
+# PYTHON_VERSION_SOURCE = "pyenv"
+
+# which versions to install
+
+# PYTHON_VERSIONS = (
+#     '3.8.1',
+#     '3.7.6',
+# )
+
+
 ## Constants
 
 # directories the actual environments are stored
 VENV_DIR = "_venv"
 CONDA_ENVS_DIR = "_conda_envs"
+# this will be set to the PYENV_PREFIX with the path to the project
+# dir
+PYENV_DIR = "_pyenv"
+
+
 
 # specified names of env specs files
 SELF_REQUIREMENTS = 'self.requirements.txt'
@@ -75,10 +96,12 @@ def get_current_pyversion():
 ## pip: things that can be controlled by pip
 
 def deps_pip_pin(cx,
-                 name=DEFAULT_ENV,
+                 path=None,
                  upgrade=False):
 
-    path = Path(ENVS_DIR) / name
+    assert path is not None
+
+    path = Path(path)
 
     # gather any development repos that are colocated on this machine
     # and solve the dependencies together
@@ -124,14 +147,16 @@ def deps_pip_pin(cx,
 
 ## conda: managing conda dependencies
 def deps_conda_pin(cx,
-                   name=DEFAULT_ENV,
+                   path=None,
                    upgrade=False,
                    optional=False,
 ):
 
     # STUB: currently upgrade does nothing
 
-    env_spec_path = Path(ENVS_DIR) / name
+    assert path is not None
+
+    env_spec_path = Path(path)
 
     if not optional:
         assert osp.exists(env_spec_path / CONDA_ABSTRACT_REQUIREMENTS), \
@@ -147,7 +172,7 @@ def deps_conda_pin(cx,
 
     # make the environment under a mangled name so we don't screw with
     # the other one
-    mangled_name = f"__mangled_{name}"
+    mangled_name = f"__mangled_tmp_env"
 
     mangled_env_spec_path = Path(ENVS_DIR) / mangled_name
 
@@ -179,7 +204,10 @@ def deps_conda_pin(cx,
 
 
     # then create the mangled env
-    env_dir = conda_env(cx, name=mangled_name)
+    env_dir = conda_env(cx,
+                        spec=mangled_env_spec_path,
+                        path=Path(CONDA_ENVS_DIR) / mangled_name,
+    )
 
     # then install the packages so we can export them
     with cx.prefix(f'eval "$(conda shell.bash hook)" && conda activate {env_dir}'):
@@ -201,49 +229,61 @@ def deps_conda_pin(cx,
     print("--------------------------------------------------------------------------------")
     print(f"This is an automated process do not attempt to activate the '__mangled' environment")
 
-# altogether
 @task
-def deps_pin(cx, name=DEFAULT_ENV):
+def deps_pin_path(cx,
+                  path=None,
+                  upgrade=False):
+    """Pin an environment given by the path."""
 
     deps_pip_pin(cx,
-                 name=name,
+                 path=path,
                  upgrade=False)
 
     if ENV_METHOD == 'conda':
         deps_conda_pin(cx,
-                       name=name,
+                       path=path,
                        upgrade=False,
                        optional=True,)
 
+
+# altogether
+@task
+def deps_pin(cx, name=DEFAULT_ENV):
+    """Pin an environment in the 'envs' directory."""
+
+    path = Path(ENVS_DIR) / name
+
+    deps_pin_path(cx, path=path)
+
+
 @task
 def deps_pin_update(cx, name=DEFAULT_ENV):
+    """Update the pinned environment in the 'envs' directory."""
 
-    deps_pip_pin(cx,
-                    name=name,
-                    upgrade=True,
+    path = Path(ENVS_DIR) / name
+
+    deps_pin_path(cx,
+                  path=path,
+                  upgrade=True,
     )
-
-    if ENV_METHOD == 'conda':
-
-        deps_conda_pin(cx,
-                       name=name,
-                       optional=True,
-                       upgrade=True)
 
 
 ### Environments
 
-def conda_env(cx, name=DEFAULT_ENV):
-
-    # locally scoped since the environment is global to the
-    # anaconda installation
-    env_name = name
+def conda_env(cx,
+              spec=None,
+              path=None,
+):
 
     # where the specs of the environment are
-    env_spec_path = Path(ENVS_DIR) / name
+    env_spec_path = Path(spec)
 
     # using the local envs dir
-    env_dir = Path(CONDA_ENVS_DIR) / name
+    env_dir = Path(path)
+
+    # ensure the directory
+    cx.run(f"mkdir -p {env_dir}")
+
 
     # clean up old envs if they weren't already
     if osp.exists(env_dir):
@@ -308,32 +348,33 @@ def conda_env(cx, name=DEFAULT_ENV):
     return env_dir
 
 
-def venv_env(cx, name=DEFAULT_ENV):
+def venv_env(cx,
+             spec=None,
+             path=None,
+):
 
-    venv_dir_path = Path(VENV_DIR)
-    venv_path = venv_dir_path / name
+    assert spec is not None
+    assert path is not None
 
-    env_spec_path = Path(ENVS_DIR) / name
+    venv_path = Path(path)
+    env_spec_path = Path(spec)
 
     # ensure the directory
-    cx.run(f"mkdir -p {venv_dir_path}")
+    cx.run(f"mkdir -p {venv_path}")
 
-    # TODO: choose the python version to use
     py_version_path = env_spec_path / PYTHON_VERSION_FILE
 
-    # SNIPPET
+    py_version = get_current_pyversion()
     if osp.exists(py_version_path):
 
-        warn("Custom python versions is not supported for venv mode yet."
-             "Please use pyenv or similar to set current env.")
-        py_version = get_current_pyversion()
+        spec_py_version = read_pyversion_file(py_version_path)
+        if spec_py_version != py_version:
+            raise ValueError(
+                f"Python version {spec_py_version} was specified in {PYTHON_VERSION_FILE} "
+                f"but Python {py_version} is activated. For the venv method you must have "
+                f"the desired python version already activated"
+        )
 
-        # SNIPPET
-        # py_version = read_pyversion_file(py_version_path)
-
-    # otherwise use the one you are currently using
-    else:
-        py_version = get_current_pyversion()
 
     print(f"Using python version: {py_version}")
 
@@ -342,6 +383,88 @@ def venv_env(cx, name=DEFAULT_ENV):
 
     # then install the things we need
     with cx.prefix(f"source {venv_path}/bin/activate"):
+
+        # update pip
+        cx.run("pip install --upgrade pip")
+
+        if osp.exists(env_spec_path / PIP_COMPILED_REQUIREMENTS):
+            cx.run(f"pip install -r {env_spec_path}/{PIP_COMPILED_REQUIREMENTS}")
+
+        else:
+            print("No requirements.txt found")
+
+        # if there is a 'self.requirements.txt' file specifying how to
+        # install the package that is being worked on install it
+        if osp.exists(env_spec_path / SELF_REQUIREMENTS):
+            cx.run(f"pip install -r {env_spec_path}/{SELF_REQUIREMENTS}")
+
+        else:
+            print("No self.requirements.txt found")
+
+    print("----------------------------------------")
+    print("to activate run:")
+    print(f"source {venv_path}/bin/activate")
+
+    return venv_path
+
+def pyenv_env(cx,
+              spec=None,
+              path=None,
+):
+
+    assert spec is not None
+    assert path is not None
+
+    # project has its own pyenv root
+    pyenv_local_dir = Path(path)
+
+    env_spec_path = Path(spec)
+
+    # ensure the directory
+    cx.run(f"mkdir -p {pyenv_local_dir}")
+
+
+    env_path = f"{pyenv_local_dir}/{name}"
+    cx.run("rm -rf {env_path}")
+
+    py_version_path = env_spec_path / PYTHON_VERSION_FILE
+
+    if osp.exists(py_version_path):
+
+        py_version = read_pyversion_file(py_version_path)
+
+    # otherwise use the one you are currently using
+    else:
+        py_version = get_current_pyversion()
+
+    print(f"Using python version: {py_version}")
+
+    # TODO: use pyenv to make the virtualenv with the right version
+
+    # if you already have pyenv installed and there are versions of
+    # python installed there we will preferentially use them while
+    # ignoring the envs there since that is a lot of unnecessary files
+    # to have all the pythons installed separately.
+
+    pyenv_root = Path(osp.expandvars("$PYENV_ROOT"))
+
+    # go ahead and use the pyenv-virtual-local command
+    if pyenv_root.exists():
+        cx.run(f"pyenv virtualenv-local \\"
+               f"--alt-dir {pyenv_local_dir} \\"
+               f"{py_version} \\"
+               f"{name}"
+        )
+
+
+    # currently we dont' support installing it
+    else:
+        raise FileNotFoundError(
+            f"pyenv not installed"
+            )
+
+    # then install the things we need
+    with cx.prefix(f"source {env_path}/bin/activate"):
 
         # update pip
         cx.run("pip install --upgrade pip")
@@ -362,19 +485,64 @@ def venv_env(cx, name=DEFAULT_ENV):
 
     print("----------------------------------------")
     print("to activate run:")
-    print(f"source {venv_path}/bin/activate")
+    print(f"source {env_path}/bin/activate")
 
-    return venv_path
+    return env_path
+
+@task
+def make_env(cx,
+             spec=None,
+             path=None,
+             venv=ENV_METHOD,
+):
+
+    assert spec is not None
+    assert path is not None
+
+    # choose your method:
+    if venv == 'conda':
+        conda_env(cx,
+                  spec=spec,
+                  path=path,
+        )
+
+    elif venv == 'venv':
+        venv_env(cx,
+                  spec=spec,
+                  path=path,
+        )
+
+
+    elif venv == 'pyenv':
+        pyenv_env(cx,
+                  spec=spec,
+                  path=path,
+        )
+
 
 @task(default=True)
 def make(cx, name=DEFAULT_ENV):
 
-    # choose your method:
+    spec_path = Path(ENVS_DIR) / name
+
+    # get the path to your envs based on the method
     if ENV_METHOD == 'conda':
-        conda_env(cx, name=name)
+        env_path = Path(CONDA_ENVS_DIR) / name
 
     elif ENV_METHOD == 'venv':
-        venv_env(cx, name=name)
+        env_path = Path(VENV_DIR) / name
+
+    elif ENV_METHOD == 'pyenv':
+        env_path = Path(PYENV_DIR) / name
+
+    else:
+        raise ValueError(f"Unrecognized venv type: {ENV_METHOD}")
+
+    make_env(cx,
+             spec=spec_path,
+             path=env_path,
+             venv = ENV_METHOD,
+    )
 
 @task
 def ls_conda(cx):
@@ -403,3 +571,16 @@ def ls(cx):
 @task
 def clean(cx):
     cx.run(f"rm -rf {VENV_DIR}")
+
+
+@task
+def install_pythons(cx):
+    """Install different python versions."""
+
+    assert PYTHON_VERSION_SOURCE == 'pyenv', \
+        "Only pyenv is supported for different python versions"
+
+    with cx.prefix("unset PYENV_VERSION"):
+        for version in PYTHON_VERSIONS:
+            cx.run(f"pyenv install --skip-existing {version}",
+                   warn=True)

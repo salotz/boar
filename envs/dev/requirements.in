@@ -25,10 +25,7 @@ jubeo
 
 # docs
 sphinx
-guzzle_sphinx_theme
 sphinxcontrib-napoleon
-nbsphinx
-notebook
 
 # testing
 pytest
@@ -47,8 +44,4 @@ pytest-benchmark
 pytest-profiling
 
 
-# dependencies
-invoke
-click
-fabric
 

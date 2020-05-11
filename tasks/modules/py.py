@@ -2,22 +2,28 @@ from invoke import task
 
 from ..config import (
     VERSION,
-    BENCHMARK_STORAGE_URL,
+    REPORTS_DIR,
     ORG_DOCS_SOURCES,
     RST_DOCS_SOURCES,
+    LOGO_DIR,
     TESTING_PYPIRC,
     PYPIRC,
+    PYENV_CONDA_NAME,
+    ENV_METHOD,
+    TESTS_DIR,
+    BENCHMARKS_DIR,
 )
 
 import sys
 import os
 import os.path as osp
 from pathlib import Path
+import shutil as sh
 
 ## User config examples
 
 # SNIPPET:
-# BENCHMARK_STORAGE_URL="./metrics/benchmarks"
+# REPORTS_DIR = "reports"
 # ORG_DOCS_SOURCES = [
 #     'changelog',
 #     'dev_guide',
@@ -37,10 +43,12 @@ from pathlib import Path
 # PYPIRC = "$HOME/.pypirc"
 # TESTING_PYPIRC = "$HOME/.test-pypirc"
 
+# PYENV_CONDA_NAME = 'miniconda3-latest'
+
 ## CONSTANTS
 
 
-BENCHMARK_STORAGE_URI="\"file://{}\"".format(BENCHMARK_STORAGE_URL)
+BENCHMARK_STORAGE_URI = f"\"file://{REPORTS_DIR}/benchmarks\""
 
 
 def project_slug():
@@ -51,6 +59,15 @@ def project_slug():
         print("You must set the 'PROJECT_SLUG' in conifig.py to use this")
     else:
         return PROJECT_SLUG
+
+@task
+def init(cx):
+
+    # install the versioneer files
+
+    # this always exits in an annoying way so we just warn here.
+    cx.run("versioneer install",
+           warn=True)
 
 @task
 def clean_dist(cx):
@@ -107,21 +124,61 @@ def clean(cx):
 def docs_clean(cx):
 
     cx.run("cd sphinx && make clean")
-    cx.run("rm -rf sphinx/_build/*")
-    cx.run("rm -rf sphinx/source/*")
-    cx.run("rm -rf sphinx/api/*")
+    cx.run("rm -rf sphinx/_build")
+    cx.run("rm -rf sphinx/_source")
+    cx.run("rm -rf sphinx/_api")
+    cx.run("rm -rf sphinx/_static")
 
-@task(pre=[docs_clean,])
+    # reports
+    cx.run("rm -rf reports/benchmarks/asv/_html")
+
+@task
+def docs_regressions(cx):
+
+    with cx.cd("benchmarks"):
+        cx.run("asv publish", warn=True)
+
+@task
+def docs_coverage(cx):
+    cx.run("coverage html -d reports/coverage/_html/index.html",
+           warn=True)
+
+@task
+def docs_complexity(cx):
+
+    os.makedirs(f"{REPORTS_DIR}/code_quality/_html",
+                exist_ok=True)
+    cx.run(f"lizard -o {REPORTS_DIR}/code_quality/_html/index.html src/{project_slug()}",
+           warn=True)
+
+@task(pre=[
+    docs_regressions,
+    docs_coverage,
+    docs_complexity,
+])
+def docs_reports(cx):
+    """Build all of the reports from source."""
+    pass
+
+@task(pre=[docs_clean, docs_reports])
 def docs_build(cx):
-    """Buld the documenation"""
+    """Buld the documentation"""
 
     # make sure the 'source' folder exists
-    cx.run("mkdir -p sphinx/source")
-    cx.run("mkdir -p sphinx/source/tutorials")
+    cx.run("mkdir -p sphinx/_source")
+    cx.run("mkdir -p sphinx/_source/tutorials")
+    cx.run("mkdir -p sphinx/_source/examples")
+    cx.run("mkdir -p sphinx/_static")
+
+    # copy the logo over
+    cx.run(f"cp {LOGO_DIR}/* sphinx/_static/")
+
+    # and the other theming things
+    cx.run(f"cp sphinx/static/* sphinx/_static/")
 
     # copy the plain RST files over to the sources
     for source in RST_DOCS_SOURCES:
-        cx.run(f"cp info/{source}.rst sphinx/source/{source}.rst")
+        cx.run(f"cp info/{source}.rst sphinx/_source/{source}.rst")
 
     # convert the org mode to rst in the source folder
     for source in ORG_DOCS_SOURCES:
@@ -132,69 +189,208 @@ def docs_build(cx):
         cx.run("pandoc "
                "-f org "
                "-t rst "
-               f"-o sphinx/source/{target}.rst "
+               f"-o sphinx/_source/{target}.rst "
                f"info/{source}.org")
 
+    ## Examples
+
+    # examples don't get put into the documentation and rendered like
+    # the tutorials do, but we do copy the README as the index
+
+    # copy the tutorials_index.rst file to the tutorials in _source
+    # TODO: remove, don't think I will use this
+    # sh.copyfile(
+    #     "sphinx/examples_index.rst",
+    #     "sphinx/_source/examples/index.rst",
+    # )
+
+
+    ## Tutorials
+
+    # convert the README
+    sh.copyfile(
+        "sphinx/tutorials_index.rst",
+        "sphinx/_source/tutorials/index.rst",
+    )
+
     # convert any of the tutorials that exist with an org mode extension as well
-    for source in os.listdir('info/tutorials'):
-        source = Path(source)
+    for item in os.listdir('info/tutorials'):
+        item = Path('info/tutorials') / item
 
-        # if it is org mode convert it and put it into the sources
-        if source.suffix == '.org':
+        # tutorials are in their own dirs
+        if item.is_dir():
 
-            source = source.stem
-            cx.run("pandoc "
-                   "-f org "
-                   "-t rst "
-                   f"-o sphinx/source/tutorials/{source}.rst "
-                   f"info/tutorials/{source}.org")
+            docs = list(item.glob("README.org")) + \
+                list(item.glob("README.ipynb")) + \
+                list(item.glob("README.rst"))
 
-        # otherwise just move it
-        else:
+            if len(docs) > 1:
+                raise ValueError(f"Multiple tutorial files for {item}")
+            else:
+                readme_path = docs[0]
 
-            # quick check for other kinds of supported files
-            assert source.suffix in ['.ipynb', '.rst',]
+            tutorial = item.stem
 
-            cx.run(f"cp info/tutorials/{source} sphinx/source/tutorials/{source}")
+            os.makedirs(f"sphinx/_source/tutorials/{tutorial}",
+                        exist_ok=True)
+
+            # we must convert org mode files to rst
+            if readme_path.suffix == '.org':
+
+                cx.run("pandoc "
+                       "-f org "
+                       "-t rst "
+                       f"-o sphinx/_source/tutorials/{tutorial}/README.rst "
+                       f"info/tutorials/{tutorial}/README.org")
+
+            # just copy notebooks since teh sphinx extension handles
+            # them
+            elif readme_path.suffix in ('.ipynb', '.rst',):
+
+                sh.copyfile(
+                    readme_path,
+                    f"sphinx/_source/tutorials/{tutorial}/{readme_path.stem}{readme_path.suffix}",
+                )
+
+            # otherwise just move it
+            else:
+                raise ValueError(f"Unkown tutorial type for file: {readme_path.stem}{readme_path.suffix}")
+
 
     # run the build steps for sphinx
     with cx.cd('sphinx'):
 
         # build the API Documentation
-        cx.run(f"sphinx-apidoc -f --separate --private --ext-autodoc --module-first --maxdepth 1 -o api ../src/{project_slug()}")
+        cx.run(f"sphinx-apidoc -f --separate --private --ext-autodoc --module-first --maxdepth 1 -o _api ../src/{project_slug()}")
 
         # then do the sphinx build process
-        cx.run("sphinx-build -b html -E -a -j 6 . ./_build/html/")
+        cx.run("sphinx-build -b html -E -a -j 6 -c . . ./_build/html/")
+
+
+
+    ## Post Sphinx
+
+    # add things like adding in metrics etc. here
+    # copy the benchmark regressions over if available
+
+    # asv regressions
+    regression_pages = Path("reports/benchmarks/asv/_html")
+
+    if regression_pages.exists() and regression_pages.is_dir():
+        sh.copytree(
+            regression_pages,
+            "sphinx/_build/html/regressions"
+        )
+
+    quality_pages = Path("reports/code_quality/_html")
+
+    if quality_pages.exists() and quality_pages.is_dir():
+        sh.copytree(
+            quality_pages,
+            "sphinx/_build/html/quality"
+        )
+
+    # coverage
+    coverage_pages = Path("reports/coverage/_html")
+
+    if coverage_pages.exists() and coverage_pages.is_dir():
+        sh.copytree(
+            coverage_pages,
+            "sphinx/_build/html/coverage"
+        )
+
+
+
 
 
 @task(pre=[docs_build])
 def docs_serve(cx):
     """Local server for documenation"""
-    cx.run("python -m http.server -d sphinx/_build/html")
+    cx.run("python -m http.server -d sphinx/_build/html 8022")
 
-### TODO: WIP Website
+### Website
 
 @task(pre=[clean_docs, clean_website, docs_build])
-def website_deploy_local(cx):
-    """Deploy the docs locally for development. Must have bundler and jekyll installed"""
+def website_serve(cx):
+    """Serve the main web page locally for development."""
 
+    # TODO: implement using Nikola
 
-    cx.cd("jekyll")
+    # STUB: just use the docs for this right now
+    docs_serve(cx)
 
-    # update dependencies
-    cx.run("bundle install")
-    cx.run("bundle update")
-
-    # run the server
-    cx.run("bundle exec jekyll serve")
 
 # STUB: @task(pre=[clean_docs, docs_build])
 @task
 def website_deploy(cx):
     """Deploy the documentation onto the internet."""
 
-    cx.run("(cd sphinx; ./deploy.sh)")
+    # use the ghp-import tool which handles the branch switching to
+    # `gh-pages` for you
+    cx.run("ghp-import --no-jekyll --push --force sphinx/_build/html")
 
+
+### Jigs
+
+# jigs are for that kind of in between work of not in module, not
+# documentation etc. Could be prototypes, troubleshooting, or anything
+# that needs non-trivial setup but isn't part of a "framework". Uses
+# the same schema as examples to give some order to it.
+
+@task
+def new_jig(cx, name=None, template="org"):
+    """Create a new jig.
+
+    Can choose between the following templates:
+    - 'org' :: org mode notebook
+
+    """
+
+    assert name is not None, "Must provide a name"
+
+    template_path = Path(f"templates/jigs/{template}")
+
+    # check if the template exists
+    if not template_path.is_dir():
+
+        raise ValueError(
+            f"Unkown template {template}. Check the 'templates/jigs' folder")
+
+    target_path = Path(f"jigs/{name}")
+
+    if target_path.exists():
+        raise FileExistsError(f"Jig with name {name} already exists. Not overwriting.")
+
+    # copy the template
+    cx.run(f"cp -r {template_path} {target_path}")
+
+    print(f"New example created at: {target_path}")
+
+@task
+def pin_jig(cx, name=None):
+    """Pin the deps for an example or all of them if 'name' is None."""
+
+    path = Path('jigs') / name / 'env'
+
+    assert path.exists() and path.is_dir(), \
+        f"Env for Jig {name} doesn't exist"
+
+    cx.run(f"inv env.deps-pin-path -p {path}")
+
+@task
+def env_jig(cx, name=None):
+    """Make a the example env in its local dir."""
+
+    if name is None:
+        raise ValueError("Must specify which jig to use")
+
+    spec_path = Path('jigs') / name / 'env'
+    env_path = Path('jigs') / name / '_env'
+
+    assert spec_path.exists() and spec_path.is_dir(), \
+        f"Jig {name} doesn't exist"
+
+    cx.run(f"inv env.make-env -s {spec_path} -p {env_path}")
 
 
 ### Tests
@@ -202,24 +398,39 @@ def website_deploy(cx):
 
 @task
 def tests_benchmarks(cx):
-    cx.run("(cd tests/tests/test_benchmarks && pytest -m 'not interactive')")
+    cx.run("pytest -m 'not interactive' tests/test_benchmarks",
+           warn=True)
 
 @task
-def tests_integration(cx):
-    cx.run(f"(cd tests/tests/test_integration && pytest -m 'not interactive')")
+def tests_integration(cx, tag=None):
+
+    if tag is None:
+        cx.run(f"coverage run -m pytest -m 'not interactive' tests/test_integration",
+               warn=True)
+    else:
+        cx.run(f"coverage run -m pytest --html=reports/pytest/{tag}/integration/report.html -m 'not interactive' tests/test_integration",
+               warn=True)
+
 
 @task
-def tests_unit(cx):
-    cx.run(f"(cd tests/tests/test_unit && pytest -m 'not interactive')")
+def tests_unit(cx, tag=None):
+
+    if tag is None:
+        cx.run(f"coverage run -m pytest -m 'not interactive' tests/test_unit",
+               warn=True)
+    else:
+        cx.run(f"coverage run -m pytest --html=reports/pytest/{tag}/unit/report.html -m 'not interactive' tests/test_unit",
+               warn=True)
+
 
 @task
 def tests_interactive(cx):
     """Run the interactive tests so we can play with things."""
-
-    cx.run("pytest -m 'interactive'")
+    cx.run("pytest -m 'interactive'",
+           warn=True)
 
 @task()
-def tests_all(cx):
+def tests_all(cx, tag=None):
     """Run all the automated tests. No benchmarks.
 
     There are different kinds of nodes that we can run on that
@@ -234,60 +445,123 @@ def tests_all(cx):
 
     """
 
-
-    tests_unit(cx)
-    tests_integration(cx)
+    tests_unit(cx, tag=tag)
+    tests_integration(cx, tag=tag)
 
 @task
-def tests_tox(cx):
+def tests_nox(cx):
 
-    NotImplemented
+    if ENV_METHOD == 'pyenv':
 
-    TOX_PYTHON_DIR=None
+        # run with base venv maker
+        with cx.prefix("unset PYENV_VERSION"):
+            cx.run("nox -s test")
 
-    cx.run("env PATH=\"{}/bin:$PATH\" tox".format(
-        TOX_PYTHON_DIR))
+    elif ENV_METHOD == 'conda':
 
-### Code Quality
+        # test running with conda
+        with cx.prefix(f"pyenv shell {PYENV_CONDA_NAME}"):
+            cx.run("nox -s test")
+
+    else:
+
+        raise ValueError(f"Unsupported ENV_METHOD: {ENV_METHOD}")
+
+
+### Code & Test Quality
+
+@task
+def docstrings_report(cx):
+
+    cx.run("mkdir -p reports/docstring_coverage")
+    cx.run("interrogate -o reports/docstring_coverage/src.interrogate.txt -vv src")
+
+    # TODO add it for tests and docs etc.
+
+@task
+def coverage_report(cx):
+    # cx.run("coverage report")
+    cx.run("coverage xml -o reports/coverage/coverage.xml",
+           warn=True)
+    cx.run("coverage json -o reports/coverage/coverage.json",
+           warn=True
+    )
+
+@task
+def coverage_serve(cx):
+    cx.run("python -m http.server -d reports/coverage/html 8020",
+           asynchronous=True)
+
 
 @task
 def lint(cx):
 
-    cx.run("mkdir -p metrics/lint")
+    cx.run(f"mkdir -p {REPORTS_DIR}/lint")
 
-    cx.run("rm -f metrics/lint/flake8.txt")
-    cx.run(f"flake8 --output-file=metrics/lint/flake8.txt src/{project_slug()}")
+    cx.run(f"rm -f {REPORTS_DIR}/lint/flake8.txt")
+    cx.run(f"flake8 --output-file={REPORTS_DIR}/lint/flake8.txt src/{project_slug()}",
+           warn=True)
 
 @task
 def complexity(cx):
     """Analyze the complexity of the project."""
 
-    cx.run("mkdir -p metrics/code_quality")
+    cx.run(f"mkdir -p {REPORTS_DIR}/code_quality")
 
-    cx.run(f"lizard -o metrics/code_quality/lizard.csv src/{project_slug()}")
-    cx.run(f"lizard -o metrics/code_quality/lizard.html src/{project_slug()}")
+    cx.run(f"lizard -o {REPORTS_DIR}/code_quality/lizard.csv src/{project_slug()}",
+           warn=True)
 
     # SNIPPET: annoyingly opens the browser
 
     # make a cute word cloud of the things used
-    # cx.run("(cd metrics/code_quality; lizard -EWordCount src/project_slug() > /dev/null)")
+    # cx.run(f"(cd {REPORTS_DIR}/code_quality; lizard -EWordCount src/project_slug() > /dev/null)")
 
-@task(pre=[complexity, lint])
+@task
+def complexity_serve(cx):
+    cx.run("python -m http.server -d reports/conde_quality/lizard.html 8021",
+           asynchronous=True)
+
+@task(pre=[coverage_report, complexity, lint])
 def quality(cx):
     pass
 
+@task(pre=[coverage_serve, complexity_serve])
+def quality_serve(cx):
+    pass
 
-### Profiling and Performance
+
+### Profiling
 
 @task
 def profile(cx):
     NotImplemented
 
+### Performance Benchmarks
+
+## regressions
+
+@task
+def regressions_all(cx):
+    """Run regression benchmarks for all of the hashes/tags in the
+    benchmarks/benchmark_selection.list file"""
+
+    with cx.cd("benchmarks"):
+        cx.run("asv run HASHFILE:benchmark_selection.list")
+
+@task
+def regression_current(cx):
+
+    with cx.cd("benchmarks"):
+        cx.run("asv run")
+
+# @task
+# def asv_update
+
 @task
 def benchmark_adhoc(cx):
     """An ad hoc benchmark that will not be saved."""
 
-    cx.run("pytest tests/tests/test_benchmarks")
+    cx.run("pytest benchmarks/pytest_benchmark/test_benchmarks")
 
 @task
 def benchmark_save(cx):
@@ -296,7 +570,7 @@ def benchmark_save(cx):
     run_command = \
 f"""pytest --benchmark-autosave --benchmark-save-data \
           --benchmark-storage={BENCHMARK_STORAGE_URI} \
-          tests/tests/test_benchmarks
+          tests/test_benchmarks
 """
 
     cx.run(run_command)

@@ -3,5 +3,7 @@
 # current working directoy is not a good idea since it will be
 # different on every machine.
 
--e ../py_rsync
--e .
+
+# TODO
+# currently can't get a working installation of py2exe for dev stuff
+# -e .

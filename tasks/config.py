@@ -6,5 +6,5 @@ from .sysconfig import *
 
 ## Customize these for all features
 
-# PROJECT_SLUG = ""
+PROJECT_SLUG = "boar"
 
