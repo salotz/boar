@@ -33,7 +33,7 @@ path:
 
 #+begin_src bash
 git clone git@github.com:salotz/boar.git --branch v0.0.0 --single-branch
-ln -s boar/boar $HOME/.local/bin
+ln -s boar/boar $HOME/.local/bin/boar
 #+end_src
 
 You will need to install some dependencies as well though which I have
